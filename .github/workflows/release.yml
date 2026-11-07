@@ -1,0 +1,108 @@
+name: Release
+
+# Baut Fotosieb aus dem privaten Quellcode-Repo TobiasWust/fotosieb und legt hier einen
+# Release-Entwurf an. Läuft in diesem öffentlichen Repo, weil Actions-Minuten hier frei sind.
+# Der Quellcode bleibt privat: Er wird nur für den Build mit einem Lese-Token geholt.
+# Start: Actions → Release → Run workflow, oder `gh workflow run release.yml -R TobiasWust/fotosieb-releases -f tag=v0.2.0`
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag im Quellcode-Repo, z. B. v0.2.0"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: TobiasWust/fotosieb
+          ref: ${{ inputs.tag }}
+          token: ${{ secrets.SOURCE_TOKEN }}
+      - name: Tag passt zur Version in Cargo.toml
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          v=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "v$v" != "$TAG" ]; then
+            echo "::error::Tag $TAG passt nicht zu Version $v, bitte tools/release.sh benutzen"
+            exit 1
+          fi
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14        # Apple Silicon
+          - os: macos-15-intel  # Intel
+          - os: windows-latest
+          - os: ubuntu-22.04
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: TobiasWust/fotosieb
+          ref: ${{ inputs.tag }}
+          token: ${{ secrets.SOURCE_TOKEN }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux-Abhängigkeiten
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - run: npm ci
+      - name: Kern-Tests
+        run: cargo test -p fotocore
+      # Tauri signiert und notarisiert, sobald diese Variablen gesetzt sind. Leere Werte
+      # würden den Build abbrechen, daher nur übernehmen, wenn ein Zertifikat hinterlegt ist.
+      - name: Apple-Signatur
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "::warning::Kein Apple-Zertifikat hinterlegt, der Mac-Build ist nur ad-hoc signiert"
+            exit 0
+          fi
+          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            echo "$v=${!v}" >> "$GITHUB_ENV"
+          done
+      - name: Bauen, Updates signieren, Release-Entwurf
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+          # Kaufseite für den Knopf „Lizenz kaufen“; leer = kein Knopf
+          FOTOSIEB_SHOP_URL: ${{ vars.FOTOSIEB_SHOP_URL }}
+          # Webseite für Impressum, Datenschutz und Lizenzbedingungen; leer = keine Links
+          FOTOSIEB_WEBSITE_URL: ${{ vars.FOTOSIEB_WEBSITE_URL }}
+        with:
+          owner: TobiasWust
+          repo: fotosieb-releases
+          releaseCommitish: main
+          tagName: ${{ inputs.tag }}
+          releaseName: Fotosieb ${{ inputs.tag }}
+          releaseBody: Neue Version von Fotosieb.
+          releaseDraft: true
+          includeUpdaterJson: true
+          args: --config src-tauri/tauri.release.conf.json
