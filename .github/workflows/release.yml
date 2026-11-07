@@ -33,6 +33,15 @@ jobs:
             echo "::error::Tag $TAG passt nicht zu Version $v, bitte tools/release.sh benutzen"
             exit 1
           fi
+      # Einmal vorab anlegen: Sonst legen die parallelen Builds jeder einen eigenen Entwurf an
+      - name: Release-Entwurf anlegen
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          if ! gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" -R "$GITHUB_REPOSITORY" --draft --target main --title "Fotosieb $TAG" --notes "Neue Version von Fotosieb."
+          fi
 
   build:
     needs: version
